@@ -1,0 +1,48 @@
+{
+  "Id": "7B07B5DE-DF94-4DF5-B4AB-55EB46D51005",
+  "Name": "Windows Install Updates",
+  "Description": "Installs windows update and reboots until there is an error or the updates are all finished.\n\nRequires Installation of the PSWindowsUpdate module on the server and target machines.",
+  "ActionType": "Octopus.Script",
+  "Version": 9,
+  "CommunityActionTemplateId": null,
+  "Properties": {
+    "Octopus.Action.Script.Syntax": "PowerShell",
+    "Octopus.Action.Script.ScriptSource": "Inline",
+    "Octopus.Action.RunOnServer": "false",
+    "Octopus.Action.Script.ScriptBody": "Import-Module PSWindowsUpdate\n$octoClientDll = Join-Path $OctopusAgentProgramDirectoryPath 'Octopus.Client.dll'\n$server = $OctopusWebBaseUrl \n$apiKey = $OctopusApiKey  \n$computerName = $OctopusMachineName\n\nAdd-Type -Path $octoClientDll\n#Shim to help powershell call into a generic function\nAdd-Type -ReferencedAssemblies @($octoClientDll) -TypeDefinition @\"\npublic class OctoHelper\n{\n    public static Octopus.Client.Model.TaskResource GetTask(Octopus.Client.IOctopusClient client, string path)\n    {\n        return client.Get<Octopus.Client.Model.TaskResource>(path);\n    }\n}\n\"@\n\n$endpoint = New-Object Octopus.Client.OctopusServerEndpoint($server, $apiKey)\n$repository = New-Object Octopus.Client.OctopusRepository($endpoint)\n\n$machine = $repository.Machines.FindOne({param($m) $m.Name -eq $computerName})\nif(-not ($machine.Id)){\n    throw \"Could not find machine with name $computerName\"\n}\n\n$computerHostname = ([System.Uri]$machine.Uri).Host\nif(-not $computerHostname){\n    throw \"Could not find machine hostname\"\n}\n\nif($env:COMPUTERNAME -eq $computerHostname){\n    throw @\"\nThis task must not run on the target machine for upates, or Octopus will not be able to execute concurrently.\nConsider changing the execution plan to Run on \"Octopus Server\" on behalf of target clients.\n\"@\n}\n\n$task = New-Object Octopus.Client.Model.TaskResource\n$task.Name = \"AdHocScript\"\n$task.Description = \"Windows Updates\"\n$task.Arguments.Add(\"Syntax\", \"PowerShell\")\n$task.Arguments.Add(\"MachineIds\", [string[]]@($machine.Id)) # //Your machine ID\n\n$updateScript = @\"     \n    Import-Module PSWindowsUpdate\n    \n    if(PSWindowsUpdate\\Get-WUInstallerStatus -Silent){\n        Write-Host \"Windows installer is busy, waiting...\"\n    }\n\n    while(PSWindowsUpdate\\Get-WUInstallerStatus -Silent){\n        Start-Sleep -s 10\n    }\n\n    Write-Host \"Checking for Windows Updates\"\n\n    PSWindowsUpdate\\Get-WUInstall –AcceptAll -IgnoreReboot -IgnoreUserInput $PSWindowsUpdateParameters\n\"@\n\n$task.Arguments.Add(\"ScriptBody\", $updateScript) #; //Or you'll probably want to read in a script body from disk\n\n\n$lastLog = [System.DateTimeOffset]::MinValue\n\n[Action[Octopus.Client.Model.TaskResource[]]]$waitAction = {\n    param($tr) \n    \n    $td = $repository.Tasks.GetDetails($tr[0])\n    if($td){\n        $ll = $lastLog\n        $td.ActivityLogs[0].Children[0].LogElements | Where-Object {$_.OccurredAt -gt $ll} | %{\n            if($_.Category -eq \"Warning\"){\n                $Host.UI.WriteWarningLine($_.MessageText)\n            }\n            elseif($_.Category -eq \"Error\"){\n                $Host.UI.WriteErrorLine($_.MessageText)\n                #Using a Host write because a Write-Error will output the stack trace for every line\n            }\n            else{\n                $Host.UI.WriteLine($_.MessageText)\n            }\n            $script:lastLog = $_.OccurredAt\n        }\n    }\n}\n\n$complete = $false\nwhile(-not $complete){\n    $task = $repository.Tasks.Create($task)\n\n    Write-Host \"Running task $($task.Description) on $computerName $server$($task.Link(\"Web\"))\"\n\n    $repository.Tasks.WaitForCompletion($task, 10, 0, $waitAction) \n\n    $task = [OctoHelper]::GetTask($repository.Tasks.Client, $task.Link(\"Self\"))\n\n    if($task.State -eq [Octopus.Client.Model.TaskState]::Failed){\n        throw \"Task Failed: $($task.ErrorMessage)\"\n    }\n    else{\n        Write-Host \"Task complete\"\n    }\n\n    if(PSWindowsUpdate\\Get-WURebootStatus -Silent -ComputerName $computerHostname)\n    {\n        Write-Host \"Reboot requried, rebooting $computerHostname\"\n        Restart-Computer -ComputerName $computerHostname -Force -Wait -For PowerShell\n        $octoService = Get-Service -ComputerName $computerHostname -Name \"OctopusDeploy Tentacle\"\n        Write-Host \"Waiting for octopus service\"\n        $octoService.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running)\n    }\n    else\n    {\n        Write-Host \"Updates are complete\"\n        $complete = $true\n    }\n}\n",
+    "Octopus.Action.Script.ScriptFileName": null,
+    "Octopus.Action.Package.FeedId": null,
+    "Octopus.Action.Package.PackageId": null
+  },
+  "Parameters": [
+    {
+      "Id": "e7fb0bfe-3476-49c4-94ff-7d94693f2399",
+      "Name": "OctopusApiKey",
+      "Type": "Sensitive",
+      "Label": "Octopus API Key",
+      "HelpText": "The step needs to be able to generate tasks on the octopus server.  To do this it needs an API key.",
+      "DefaultValue": "",
+      "DisplaySettings": {
+        "Octopus.ControlType": "SingleLineText"
+      },
+      "Links": {}
+    },
+    {
+      "Id": "a09eab31-efbf-4fcb-8ffe-08f227fc5fbd",
+      "Name": "PSWindowsUpdateParameters",
+      "Type": "String",
+      "Label": "Windows Update Parameters",
+      "HelpText": "Additional parameters passed to the Get-WUInstall command executed on the client to install windows updates.\n\nParameters already passed are...\n–AcceptAll -IgnoreReboot -IgnoreUserInput",
+      "DefaultValue": "",
+      "DisplaySettings": {
+        "Octopus.ControlType": "SingleLineText"
+      },
+      "Links": {}
+    }
+  ],
+  "$Meta": {
+    "ExportedAt": "2017-05-18T22:10:53.989Z",
+    "OctopusVersion": "3.11.7",
+    "Type": "ActionTemplate"
+  }
+}
